@@ -55,6 +55,63 @@ namespace WebApiLib
 
     //*************************************************************************
     /// <summary>
+    /// WebApi Event
+    /// </summary>
+    //*************************************************************************
+    public class ApiEvent
+    {
+        public enum EventTypeEnum { unknown, connect, disconnect }
+
+        public Guid GUID { set; get; }
+
+        public EventTypeEnum EventType { set; get; }
+
+        public List<Argument> Arguments { set; get; }
+
+        public ApiEvent(EventTypeEnum eventType, List<Argument> arguments)
+        {
+            EventType = eventType;
+            Arguments = arguments;
+            GUID = Guid.NewGuid();
+        }
+
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="data"></param>
+        /// <returns></returns>
+        //*********************************************************************
+        public static ApiEvent Deserialize(string data)
+        {
+            var settings = new JsonSerializerSettings
+            {
+                NullValueHandling = NullValueHandling.Ignore,
+                MissingMemberHandling = MissingMemberHandling.Ignore
+            };
+            settings.Converters.Add(new StringEnumConverter(new CamelCaseNamingStrategy()));
+            return JsonConvert.DeserializeObject<ApiEvent>(data, settings);
+        }
+
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <returns></returns>
+        //*********************************************************************
+        public string Serialize()
+        {
+            var settings = new JsonSerializerSettings
+            {
+                NullValueHandling = NullValueHandling.Ignore
+            };
+            settings.Converters.Add(new StringEnumConverter(new CamelCaseNamingStrategy()));
+            return JsonConvert.SerializeObject(this, settings);
+        }
+    }
+
+    //*************************************************************************
+    /// <summary>
     /// WebApi Request
     /// </summary>
     //*************************************************************************
@@ -82,9 +139,11 @@ namespace WebApiLib
         //*********************************************************************
         public static Request Deserialize(string data)
         {
-            var settings = new JsonSerializerSettings {
-                NullValueHandling = NullValueHandling.Ignore, 
-                MissingMemberHandling = MissingMemberHandling.Ignore };
+            var settings = new JsonSerializerSettings
+            {
+                NullValueHandling = NullValueHandling.Ignore,
+                MissingMemberHandling = MissingMemberHandling.Ignore
+            };
             settings.Converters.Add(new StringEnumConverter(new CamelCaseNamingStrategy()));
             return JsonConvert.DeserializeObject<Request>(data, settings);
         }
@@ -97,8 +156,10 @@ namespace WebApiLib
         //*********************************************************************
         public string Serialize()
         {
-            var settings = new JsonSerializerSettings { 
-                NullValueHandling = NullValueHandling.Ignore };
+            var settings = new JsonSerializerSettings
+            {
+                NullValueHandling = NullValueHandling.Ignore
+            };
             settings.Converters.Add(new StringEnumConverter(new CamelCaseNamingStrategy()));
             return JsonConvert.SerializeObject(this, settings);
         }
@@ -119,10 +180,23 @@ namespace WebApiLib
 
         public Exception Exception { set; get; }
 
-        public Response(Guid requestGUID, ResultEnum result, 
+        public Response()
+        {
+        }
+
+        public Response(Guid requestGUID, ResultEnum result,
             List<Argument> arguments, Exception exception)
         {
             RequestGUID = requestGUID;
+            Result = result;
+            Arguments = Arguments;
+            Exception = exception;
+        }
+
+        public Response(ResultEnum result, List<Argument> arguments, 
+            Exception exception)
+        {
+            RequestGUID = new Guid();
             Result = result;
             Arguments = Arguments;
             Exception = exception;
@@ -326,6 +400,7 @@ namespace WebApiLib
     public class WebApiClient : WebApiCore
     {
         WebServerLib.TTWebSocketClient _client = new WebServerLib.TTWebSocketClient();
+        bool _connected = false;
 
         //*********************************************************************
         /// <summary>
@@ -334,17 +409,14 @@ namespace WebApiLib
         /// <param name="url"></param>
         /// <returns></returns>
         //*********************************************************************
-        public bool Connect(string url)
+        public async Task<bool> Connect(string url)
         {
-            _client.Connect(url);
-            _client.Listen(GotMessageCallback, CancellationToken.None);
+            _connected = await _client.Connect(url);
 
-            //while(!_connectedToApi)
-            //{
-            //    Thread.Sleep(100);
-            //}
+            if (_connected)
+                _client.Listen(GotMessageCallback, CancellationToken.None);
 
-            return true;
+            return _connected;
         }
 
         //*********************************************************************
@@ -390,14 +462,48 @@ namespace WebApiLib
     public class WebApiServer 
     {
         WebServerLib.TTWebSocketServer WSS = null;
+        public delegate Response GotRequestCallback(Request request);
+        protected GotRequestCallback _gotRequestCallback;
+        public delegate void GotEventCallback(ApiEvent apiEvent);
+        protected GotEventCallback _gotEventCallback;
 
-        public void StartServer(string url)
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="url"></param>
+        /// <param name="gotRequestCallback"></param>
+        /// <param name="gotEventCallback"></param>
+        //*********************************************************************
+        public void StartServer(string url, 
+            GotRequestCallback gotRequestCallback, 
+            GotEventCallback gotEventCallback)
         {
+            _gotRequestCallback = gotRequestCallback;
+            _gotEventCallback = gotEventCallback;
             WSS = new WebServerLib.TTWebSocketServer();
-            //WSS.StartServer(url, GotMessageCallback);
-            WSS.StartServer(url, GotMessageCallback);
+
+            WSS.StartServer(url, GotMessageCallback, GotEventCallbackHandler);
         }
 
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="apiEvent"></param>
+        //*********************************************************************
+        private void GotEventCallbackHandler(ApiEvent apiEvent)
+        {
+            _gotEventCallback?.Invoke(apiEvent);
+        }
+
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="data"></param>
+        /// <returns></returns>
+        //*********************************************************************
         private string GotMessageCallback(string data)
         {
             var message = Message.Deserialize(data);
@@ -409,10 +515,15 @@ namespace WebApiLib
                     break;
                 case MessageTypeEnum.request:
                     //call registered request processor
-                    var resp = new Response(message.Request.GUID, ResultEnum.ok, message.Request.Arguments, null);
+                    //var resp = new Response(message.Request.GUID, ResultEnum.ok, message.Request.Arguments, null);
 
-                    message = new Message(resp);
-                    return message.Serialize();
+                    if (null != _gotRequestCallback)
+                    {
+                        var resp = _gotRequestCallback(message.Request);
+                        resp.RequestGUID = message.Request.GUID;
+                        message = new Message(resp);
+                        return message.Serialize();
+                    }
 
                     break;
                 case MessageTypeEnum.response:
@@ -440,6 +551,7 @@ namespace WebServerLib
     public class TTWebSocket
     {
         public delegate string GotMessageCallback(string data);
+        public delegate void GotEventCallback(WebApiLib.ApiEvent apiEvent);
         protected GotMessageCallback _gotMessageCallback;
     }
 
@@ -467,29 +579,35 @@ namespace WebServerLib
         /// </summary>
         /// <param name="url"></param>
         //*********************************************************************
-        public void Connect(string url)
+        public async Task<bool> Connect(string url)
         {
             try
             {
-                sock.ConnectAsync(new Uri(url), CancellationToken.None);
+                await sock.ConnectAsync(new Uri(url), CancellationToken.None);
                 //Receive(CancellationToken.None);
+
+                int sleepTimeMs = 50;
+                int abandonTimeMs = 10000;
+                int tryCount = 0;
+
+                while (sock.State != WebSocketState.Open)
+                {
+                    if (tryCount++ > abandonTimeMs / sleepTimeMs)
+                    {
+                        //TODO do something
+                        return false;
+                    }
+
+                    Thread.Sleep(sleepTimeMs);
+                }
+
+                return true;
             }
             catch (Exception ex)
             {
-                var msg = ex.Message;
+                throw;
             }
         }
-
-        //*********************************************************************
-        /// <summary>
-        /// 
-        /// </summary>
-        //*********************************************************************
-        public void Connect()
-        {
-            Connect("ws://localhost:8877/wsapi");
-        }
-
         //*********************************************************************
         /// <summary>
         /// Send a message
@@ -527,35 +645,52 @@ namespace WebServerLib
         {
             _gotMessageCallback = callback;
 
+            int sleepTimeMs = 50;
+            int abandonTimeMs = 5000;
+            int tryCount = 0;
+
             var buffer = new ArraySegment<byte>(new byte[2048]);
 
             while (sock.State != WebSocketState.Open)
             {
-                Thread.Sleep(50);
+                if (tryCount++ > abandonTimeMs / sleepTimeMs)
+                {
+                    //TODO do something
+                    return;
+                }
+
+                Thread.Sleep(sleepTimeMs);
             }
 
             while (!stoppingToken.IsCancellationRequested)
             {
-                WebSocketReceiveResult result;
-                using (var ms = new MemoryStream())
+                try
                 {
-                    do
+                    WebSocketReceiveResult result;
+                    using (var ms = new MemoryStream())
                     {
-                        result = await sock.ReceiveAsync(buffer, stoppingToken);
-                        ms.Write(buffer.Array, buffer.Offset, result.Count);
-                    } while (!result.EndOfMessage);
+                        do
+                        {
+                            result = await sock.ReceiveAsync(buffer, stoppingToken);
+                            ms.Write(buffer.Array, buffer.Offset, result.Count);
+                        } while (!result.EndOfMessage);
 
-                    if (result.MessageType == WebSocketMessageType.Close)
-                        break;
+                        if (result.MessageType == WebSocketMessageType.Close)
+                            break;
 
-                    ms.Seek(0, SeekOrigin.Begin);
-                    using (var reader = new StreamReader(ms, System.Text.Encoding.UTF8))
-                    {
-                        //Console.WriteLine(await reader.ReadToEndAsync());
-                        
-                        string data = await reader.ReadToEndAsync();
-                        _gotMessageCallback?.Invoke(data);
+                        ms.Seek(0, SeekOrigin.Begin);
+                        using (var reader = new StreamReader(ms, System.Text.Encoding.UTF8))
+                        {
+                            //Console.WriteLine(await reader.ReadToEndAsync());
+
+                            string data = await reader.ReadToEndAsync();
+                            _gotMessageCallback?.Invoke(data);
+                        }
                     }
+                }
+                catch(Exception ex)
+                {
+                    //TODO Do Something
                 }
             };
         }
@@ -603,7 +738,9 @@ namespace WebServerLib
         /// <param name="url"></param>
         /// <returns></returns>
         //*********************************************************************
-        private static WebServer CreateWebServer(string url, TTWebSocket.GotMessageCallback callback)
+        private static WebServer CreateWebServer(string url, 
+            TTWebSocket.GotMessageCallback callback,
+            TTWebSocket.GotEventCallback eventCallback)
         {
 #pragma warning disable CA2000 // Call Dispose on object - this is a factory method.
             try
@@ -621,14 +758,15 @@ namespace WebServerLib
                         "post") // Allowed methods
                     .WithWebApi("/api", m => m
                         .WithController<PeopleController>())
-                    .WithModule(new WebSocketWebApiModule("/wsapi", callback))
+                    .WithModule(new WebSocketWebApiModule("/wsapi", callback, eventCallback))
                     .WithModule(new WebSocketTerminalModule("/terminal"))
                     .WithStaticFolder("/", HtmlRootPath, true, m => m
                         .WithContentCaching(UseFileCache)) // Add static files after other modules to avoid conflicts
                     .WithModule(new ActionModule("/", HttpVerbs.Any, ctx => ctx.SendDataAsync(new { Message = "Error" })));
 
                 // Listen for state changes.
-                server.StateChanged += (s, e) => $"WebServer New State - {e.NewState}".Info();
+                //server.StateChanged += (s, e) => $"WebServer New State - {e.NewState}".Info();
+                server.StateChanged += Server_StateChanged;
 
                 return server;
             }
@@ -641,6 +779,11 @@ namespace WebServerLib
 #pragma warning restore CA2000
         }
 
+        private static void Server_StateChanged(object sender, WebServerStateChangedEventArgs e)
+        {
+            var wss = e.NewState;
+        }
+
         //*********************************************************************
         /// <summary>
         /// 
@@ -650,9 +793,11 @@ namespace WebServerLib
         /// <returns></returns>
         //*********************************************************************
         private static async Task RunWebServerAsync(string url, 
-            TTWebSocket.GotMessageCallback callback, CancellationToken cancellationToken)
+            TTWebSocket.GotMessageCallback callback,
+            TTWebSocket.GotEventCallback eventCallback,
+            CancellationToken cancellationToken)
         {
-            using (var server = CreateWebServer(url, callback))
+            using (var server = CreateWebServer(url, callback, eventCallback))
             {
                 await server.RunAsync(cancellationToken).ConfigureAwait(false);
             }
@@ -663,9 +808,11 @@ namespace WebServerLib
         /// 
         /// </summary>
         //*********************************************************************
-        public void StartServer(string url, TTWebSocket.GotMessageCallback callback)
+        public void StartServer(string url, 
+            TTWebSocket.GotMessageCallback callback,
+            TTWebSocket.GotEventCallback eventCallback)
         {
-            RunWebServerAsync(url, callback, cts.Token);
+            RunWebServerAsync(url, callback, eventCallback, cts.Token);
         }
     }
 
@@ -677,14 +824,34 @@ namespace WebServerLib
     public class WebSocketWebApiModule : WebSocketModule
     {
         private TTWebSocket.GotMessageCallback _callback;
+        private TTWebSocket.GotEventCallback _eventCallback;
 
-        public WebSocketWebApiModule(string urlPath, TTWebSocket.GotMessageCallback callback)
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="urlPath"></param>
+        /// <param name="callback"></param>
+        /// <param name="eventCallback"></param>
+        //*********************************************************************
+        public WebSocketWebApiModule(string urlPath, 
+            TTWebSocket.GotMessageCallback callback,
+            TTWebSocket.GotEventCallback eventCallback)
             : base(urlPath, true)
         {
             _callback = callback;
+            _eventCallback = eventCallback;
         }
 
-        /// <inheritdoc />
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="context"></param>
+        /// <param name="rxBuffer"></param>
+        /// <param name="rxResult"></param>
+        /// <returns></returns>
+        //*********************************************************************
         protected override Task OnMessageReceivedAsync(
             IWebSocketContext context,
             byte[] rxBuffer,
@@ -692,21 +859,57 @@ namespace WebServerLib
         {
             var response = _callback?.Invoke(Encoding.GetString(rxBuffer));           
             return SendAsync(context, response);
-
-            //return SendAsync(context, new WebApiLib.Message(new WebApiLib.Response(new Guid(), WebApiLib.ResultEnum.ok, new List<WebApiLib.Argument>(), null)));
         }
 
-        /// <inheritdoc />
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="context"></param>
+        /// <returns></returns>
+        //*********************************************************************
         protected override Task OnClientConnectedAsync(IWebSocketContext context)
-            => SendAsync(context, new WebApiLib.Message(WebApiLib.MessageTypeEnum.connection));
+        {
+            _eventCallback?.Invoke(new WebApiLib.ApiEvent(
+                WebApiLib.ApiEvent.EventTypeEnum.connect, null));
+            return Task.FromResult<object>(null);
+        }
+        //=> SendAsync(context, new WebApiLib.Message(WebApiLib.MessageTypeEnum.connection));
 
-        /// <inheritdoc />
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="context"></param>
+        /// <returns></returns>
+        //*********************************************************************
         protected override Task OnClientDisconnectedAsync(IWebSocketContext context)
-            => SendToOthersAsync(context, "Someone left the chat room.");
+        {
+            _eventCallback?.Invoke(new WebApiLib.ApiEvent(
+                WebApiLib.ApiEvent.EventTypeEnum.disconnect, null));
+            return Task.FromResult<object>(null);
+        }
+        //=> SendToOthersAsync(context, "Someone left the chat room.");
 
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="context"></param>
+        /// <param name="payload"></param>
+        /// <returns></returns>
+        //*********************************************************************
         private Task SendToOthersAsync(IWebSocketContext context, string payload)
             => BroadcastAsync(payload, c => c != context);
 
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="context"></param>
+        /// <param name="message"></param>
+        /// <returns></returns>
+        //*********************************************************************
         private Task SendAsync(IWebSocketContext context, WebApiLib.Message message)
         {
             return SendAsync(context, message.Serialize());
