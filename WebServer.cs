@@ -45,6 +45,10 @@ namespace WebApiLib
         public object Value { set; get; }
         public Type Type { set; get; }
 
+        public Argument()
+        {
+        }
+
         public Argument(string name, object value)
         {
             Name = name;
@@ -67,6 +71,10 @@ namespace WebApiLib
         public EventTypeEnum EventType { set; get; }
 
         public List<Argument> Arguments { set; get; }
+
+        public ApiEvent()
+        {
+        }
 
         public ApiEvent(EventTypeEnum eventType, List<Argument> arguments)
         {
@@ -122,6 +130,10 @@ namespace WebApiLib
         public string MethodName { set; get; }
 
         public List<Argument> Arguments { set; get; }
+
+        public Request()
+        {
+        }
 
         public Request(string methodName, List<Argument> arguments)
         {
@@ -275,6 +287,7 @@ namespace WebApiLib
             var settings = new JsonSerializerSettings { NullValueHandling = NullValueHandling.Ignore, MissingMemberHandling = MissingMemberHandling.Ignore };
             settings.Converters.Add(new StringEnumConverter(new CamelCaseNamingStrategy()));
             return JsonConvert.DeserializeObject<Message>(data, settings);
+
         }
 
         //*********************************************************************
@@ -303,10 +316,54 @@ namespace WebApiLib
     //*************************************************************************
     public class WebApiCore
     {
+        //signature of request handling methods
+        public delegate List<WebApiLib.Argument> MethodCallback(List<WebApiLib.Argument> args);
+
+        //signature of event handling methods
+        public delegate void EventCallback(WebApiLib.ApiEvent apiEvent);
+
+        //list of request handling methods
+        Dictionary<string, MethodCallback> _methodList = new Dictionary<string, MethodCallback>();
+
         protected EventWaitHandle _gotNewResponse = new EventWaitHandle(false, EventResetMode.ManualReset);
         protected Queue<Request> RequestsReceived = new Queue<Request>();
         protected Queue<Response> ResponsesReceived = new Queue<Response>();
         protected bool _connectedToApi = false;
+        protected WebServerLib.TTWebSocketClient _client = null;
+
+        //*************************************************************************
+        /// <summary>
+        /// Register an Api method handler to be invoked by name
+        /// </summary>
+        /// <param name="methodName"></param>
+        /// <param name="methodCallback"></param>
+        //*************************************************************************
+        public void AddApiMethod(string methodName, MethodCallback methodCallback)
+        {
+            _methodList.Add(methodName, methodCallback);
+        }
+
+        //*************************************************************************
+        /// <summary>
+        /// Handle a method request
+        /// </summary>
+        /// <param name="req"></param>
+        /// <returns></returns>
+        //*************************************************************************
+        private WebApiLib.Response HandleRequest(WebApiLib.Request req)
+        {
+            try
+            {
+                if (!_methodList.TryGetValue(req.MethodName, out MethodCallback method))
+                    return new WebApiLib.Response(WebApiLib.ResultEnum.notfound, null, null);
+
+                return new WebApiLib.Response(WebApiLib.ResultEnum.ok, method.Invoke(req.Arguments), null);
+            }
+            catch (Exception ex)
+            {
+                return new WebApiLib.Response(WebApiLib.ResultEnum.exception, null, ex);
+            }
+        }
 
         //*********************************************************************
         /// <summary>
@@ -326,6 +383,7 @@ namespace WebApiLib
                     _connectedToApi = true;
                     break;
                 case MessageTypeEnum.request:
+                    HandleRequest(message.Request);
                     break;
                 case MessageTypeEnum.response:
                     ResponsesReceived.Enqueue(message.Response);
@@ -399,7 +457,7 @@ namespace WebApiLib
     //*************************************************************************
     public class WebApiClient : WebApiCore
     {
-        WebServerLib.TTWebSocketClient _client = new WebServerLib.TTWebSocketClient();
+        //WebServerLib.TTWebSocketClient _client = new WebServerLib.TTWebSocketClient();
         bool _connected = false;
 
         //*********************************************************************
@@ -411,6 +469,7 @@ namespace WebApiLib
         //*********************************************************************
         public async Task<bool> Connect(string url)
         {
+            _client = new WebServerLib.TTWebSocketClient();
             _connected = await _client.Connect(url);
 
             if (_connected)
@@ -441,6 +500,15 @@ namespace WebApiLib
             return await WaitForResponse(request, timeoutMs);
         }
 
+        //*********************************************************************
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="methodName"></param>
+        /// <param name="argumentList"></param>
+        /// <param name="timeoutMs"></param>
+        /// <returns></returns>
+        //*********************************************************************
         public async Task<Response> Invoke(string methodName,
             List<Argument> argumentList, int timeoutMs = 15000)
         {
@@ -506,33 +574,46 @@ namespace WebApiLib
         //*********************************************************************
         private string GotMessageCallback(string data)
         {
-            var message = Message.Deserialize(data);
-
-            switch (message.MessageType)
+            try
             {
-                case MessageTypeEnum.connection:
-                    //_connectedToApi = true;
-                    break;
-                case MessageTypeEnum.request:
-                    //call registered request processor
-                    //var resp = new Response(message.Request.GUID, ResultEnum.ok, message.Request.Arguments, null);
+                var message = Message.Deserialize(data);
 
-                    if (null != _gotRequestCallback)
-                    {
-                        var resp = _gotRequestCallback(message.Request);
-                        resp.RequestGUID = message.Request.GUID;
-                        message = new Message(resp);
-                        return message.Serialize();
-                    }
+                switch (message.MessageType)
+                {
+                    case MessageTypeEnum.connection:
+                        //_connectedToApi = true;
+                        break;
+                    case MessageTypeEnum.request:
+                        //call registered request processor
+                        //var resp = new Response(message.Request.GUID, ResultEnum.ok, message.Request.Arguments, null);
 
-                    break;
-                case MessageTypeEnum.response:
-                    //ResponsesReceived.Enqueue(message.Response);
-                    //_gotNewResponse.Set();
-                    break;
+                        if (null != _gotRequestCallback)
+                        {
+                            var resp = _gotRequestCallback(message.Request);
+                            resp.RequestGUID = message.Request.GUID;
+                            message = new Message(resp);
+                            return message.Serialize();
+                        }
+
+                        break;
+                    case MessageTypeEnum.response:
+                        //ResponsesReceived.Enqueue(message.Response);
+                        //_gotNewResponse.Set();
+                        break;
+                }
+
+                return null;
             }
+            catch(Exception ex)
+            {
+                LogThis(ex);
+                return (new Message(new Response(ResultEnum.exception, null, ex))).Serialize();
+            }
+        }
 
-            return null;
+        private async void LogThis(Exception ex)
+        {
+            //TODO
         }
     }
 
